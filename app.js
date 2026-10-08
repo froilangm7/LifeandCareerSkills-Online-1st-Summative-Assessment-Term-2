@@ -1,0 +1,183 @@
+const $ = (id) => document.getElementById(id);
+
+const startScreen = $("startScreen");
+const examScreen = $("examScreen");
+const lockedScreen = $("lockedScreen");
+const studentName = $("studentName");
+const section = $("section");
+const agreement = $("agreement");
+const startBtn = $("startBtn");
+const formsFrame = $("formsFrame");
+const timerEl = $("timer");
+
+let started = false;
+let frozen = false;
+let secondsLeft = EXAM_MINUTES * 60;
+let timerHandle = null;
+let incidentSent = false;
+
+// Strike System Counters
+let violationCount = 0;
+const MAX_VIOLATIONS = 3; // Freezes session on the 3rd violation
+
+agreement.addEventListener("change", () => {
+  startBtn.disabled = !agreement.checked || !studentName.value.trim() || !section.value.trim();
+});
+
+[studentName, section].forEach(el => el.addEventListener("input", () => {
+  startBtn.disabled = !agreement.checked || !studentName.value.trim() || !section.value.trim();
+}));
+
+async function requestFullscreen() {
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    }
+  } catch (_) {
+    // Fullscreen can be denied by browser/OS. The portal continues.
+  }
+}
+
+function sendIncident(type) {
+  const payload = {
+    student: studentName.value.trim(),
+    section: section.value.trim(),
+    type,
+    timestamp: new Date().toISOString(),
+    page: location.href,
+    userAgent: navigator.userAgent
+  };
+
+  localStorage.setItem("last_exam_incident", JSON.stringify(payload));
+
+  if (INCIDENT_ENDPOINT) {
+    try {
+      navigator.sendBeacon(
+        INCIDENT_ENDPOINT,
+        new Blob([JSON.stringify(payload)], {type: "application/json"})
+      );
+      incidentSent = true;
+    } catch (_) {}
+  }
+
+  return payload;
+}
+
+function freezeExam(type, message) {
+  if (!started || frozen) return;
+  frozen = true;
+  clearInterval(timerHandle);
+
+  const p = sendIncident(type);
+  $("incidentType").textContent = type;
+  $("incidentTime").textContent = new Date(p.timestamp).toLocaleString();
+  $("lockReason").textContent = message;
+
+  examScreen.classList.add("hidden");
+  lockedScreen.classList.remove("hidden");
+
+  try { document.exitFullscreen?.(); } catch (_) {}
+}
+
+function handleViolation(type, message) {
+  if (!started || frozen) return;
+  
+  violationCount++;
+  
+  if (violationCount >= MAX_VIOLATIONS) {
+    freezeExam(type, message);
+  } else {
+    alert(`WARNING (${violationCount}/${MAX_VIOLATIONS - 1}): Please do not leave or exit the examination screen!`);
+  }
+}
+
+function updateTimer() {
+  const m = Math.floor(secondsLeft / 60).toString().padStart(2,"0");
+  const s = (secondsLeft % 60).toString().padStart(2,"0");
+  timerEl.textContent = `${m}:${s}`;
+
+  if (secondsLeft <= 0) {
+    clearInterval(timerHandle);
+    $("status").textContent = "TIME LIMIT REACHED";
+    return;
+  }
+  secondsLeft--;
+}
+
+startBtn.addEventListener("click", async () => {
+  if (FORM_URL.includes("PASTE_YOUR_")) {
+    alert("Teacher setup incomplete: replace FORM_URL in config.js with your Microsoft Forms quiz URL.");
+    return;
+  }
+
+  started = true;
+  startScreen.classList.add("hidden");
+  examScreen.classList.remove("hidden");
+
+  $("studentBadge").textContent = `${studentName.value.trim()} • ${section.value.trim()}`;
+  formsFrame.src = FORM_URL;
+
+  await requestFullscreen();
+  updateTimer();
+  timerHandle = setInterval(updateTimer, 1000);
+});
+
+/* ==========================================
+   ENHANCED IFRAME FOCUS & TAB DETECTOR
+   ========================================== */
+
+// 1. Detect when focus shifts to Microsoft Forms iframe specifically
+window.addEventListener("blur", () => {
+  if (!started || frozen) return;
+
+  // If focus moved to the Microsoft Forms iframe, allow it without striking
+  if (document.activeElement === formsFrame) {
+    return;
+  }
+
+  // If focus went completely outside the browser window/app entirely
+  handleViolation(
+    "WINDOW/FOCUS LOST",
+    "The examination window lost focus. Your session has been frozen for teacher verification."
+  );
+});
+
+// 2. Tab/App Switch Guard (Triggers even when interacting inside Microsoft Forms)
+document.addEventListener("visibilitychange", () => {
+  if (started && document.hidden) {
+    handleViolation(
+      "PAGE/APP VISIBILITY LOST",
+      "The examination page was no longer visible. Your session has been frozen for teacher verification."
+    );
+  }
+});
+
+window.addEventListener("pagehide", () => {
+  if (started && !frozen) {
+    sendIncident("PAGEHIDE / NAVIGATION EVENT");
+  }
+});
+
+document.addEventListener("fullscreenchange", () => {
+  if (started && !document.fullscreenElement && !frozen) {
+    handleViolation(
+      "FULLSCREEN EXITED",
+      "Fullscreen mode was exited. Your session has been frozen for teacher verification."
+    );
+  }
+});
+
+$("paperBtn").addEventListener("click", () => {
+  alert("Please remain in your seat and wait for your teacher/proctor to provide the supervised paper version.");
+});
+
+/* Keyboard deterrence */
+document.addEventListener("keydown", (e) => {
+  if (!started) return;
+  if (e.key === "F12" ||
+      (e.ctrlKey && ["l","t","n","w","r","u","s","p"].includes(e.key.toLowerCase())) ||
+      (e.metaKey && ["l","t","n","w","r","u","s","p"].includes(e.key.toLowerCase()))) {
+    e.preventDefault();
+    handleViolation("RESTRICTED KEYBOARD COMMAND", "A restricted browser command was detected.");
+  }
+});
